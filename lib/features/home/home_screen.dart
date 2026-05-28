@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:homesync/features/providers/head_pose/head_pose_screen.dart';
+import 'package:homesync/features/head_pose/head_pose_screen.dart';
 import 'package:homesync/features/providers/mqtt_provider.dart';
 import 'package:homesync/features/providers/voice_provider.dart';
 import 'package:homesync/models/mqtt_state.dart';
@@ -22,9 +22,7 @@ class HomeScreen extends ConsumerWidget {
             : () => voiceNotifier.startListening(),
         icon: Icon(voiceState.isListening ? Icons.mic_off : Icons.mic),
         label: Text(voiceState.isListening ? "جاري الاستماع..." : "أمر صوتي"),
-        backgroundColor: voiceState.isListening
-            ? Colors.red
-            : Colors.deepPurple,
+        backgroundColor: voiceState.isListening ? Colors.red : Colors.green,
       ),
       appBar: AppBar(
         leading: IconButton(
