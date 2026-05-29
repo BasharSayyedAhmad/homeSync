@@ -91,15 +91,15 @@ class HeadPosePlugin :
     private val yawLeftEnter  = -15.0;  private val yawLeftExit  = -7.0
     private val yawRightEnter =  15.0;  private val yawRightExit =  7.0
 
-    // أعلى / أسفل
-    private val pitchUpEnter   = -8.0;  private val pitchUpExit   = -4.0
-    private val pitchDownEnter =  8.0;  private val pitchDownExit =  4.0
+    // أعلى / أسفل — رُفعت العتبات لتقليل الحساسية الزائدة
+    private val pitchUpEnter   = -12.0;  private val pitchUpExit   = -6.0
+    private val pitchDownEnter =  12.0;  private val pitchDownExit =  6.0
 
     // حدود منطقة المركز — يجب أن تكون بين Exit و Enter لكل محور
-    //   Yaw  : Exit=7.0  < centerYaw=10.0   < Enter=15.0  ✓
-    //   Pitch: Exit=4.0  < centerPitch=5.5  < Enter=8.0   ✓
+    //   Yaw  : Exit=7.0  < centerYaw=10.0  < Enter=15.0  ✓
+    //   Pitch: Exit=6.0  < centerPitch=8.0 < Enter=12.0  ✓
     private val centerYawThreshold   = 10.0
-    private val centerPitchThreshold =  5.5   // كانت 10.0 → خطأ كان يسبب اهتزازاً
+    private val centerPitchThreshold =  8.0
 
     // ── واجهة المعاينة ─────────────────────────────────────────────────────────
     private var previewView:      PreviewView?    = null
@@ -119,8 +119,8 @@ class HeadPosePlugin :
 
     // EAR = نسبة المسافة العمودية / الأفقية للعين
     // أقل من earClose → العين مغلقة | أعلى من earOpen → العين مفتوحة (hysteresis)
-    private val earClose         = 0.20
-    private val earOpen          = 0.25
+    private val earClose         = 0.18   // خُفِّض من 0.20 لتسهيل الكشف
+    private val earOpen          = 0.22   // خُفِّض من 0.25
 
     // الغمزة الصحيحة تحتاج إغلاقاً لمدة إطارين متتاليين على الأقل (~130ms @ 15fps)
     // هذا يمنع الضجيج العارض من التشغيل الخاطئ
@@ -452,8 +452,9 @@ class HeadPosePlugin :
         val rawRoll  = Math.toDegrees(atan2( m10,  m00))   // دوران Z = الإمالة
 
         // نعكس إشارة Yaw لأن الصورة المرسلة لـ MediaPipe معكوسة (postScale -1)
+        // نعكس إشارة Pitch لأن اتجاه محور X في MediaPipe عكس الحدس (أعلى = سالب)
         val filteredYaw   = yawKalman.update(-rawYaw)
-        val filteredPitch = pitchKalman.update(rawPitch)
+        val filteredPitch = pitchKalman.update(-rawPitch)   // ← إضافة النفي يصلح المعكوس
         val filteredRoll  = rollKalman.update(rawRoll)
 
         // ── المعايرة ──────────────────────────────────────────────────────────
@@ -595,6 +596,7 @@ class HeadPosePlugin :
 
     // إرسال حدث الغمزة إلى Flutter عبر نفس الـ EventChannel
     private fun sendBlink() {
+        overlayView?.updateBlink()   // وميض فوري على الشاشة
         eventSink?.let { sink ->
             mainHandler.post {
                 sink.success(mapOf("blink" to true))
@@ -655,11 +657,17 @@ class HeadPosePlugin :
         @Volatile private var imgHeight = 0
         @Volatile private var latency   = 0L
         @Volatile private var fps       = 0
+        @Volatile private var blinkFlashEnd = 0L   // وقت انتهاء وميض "BLINK ✓"
 
         fun setImageDimensions(w: Int, h: Int)    { imgWidth = w; imgHeight = h }
         fun updateLatency(ms: Long)               { latency = ms }
         fun updateFps(f: Int)                     { fps = f }
         fun clearLandmarks()                      { landmarks = null; postInvalidateOnAnimation() }
+        // يُشغَّل من sendBlink — يعرض "BLINK ✓" لمدة ثانية واحدة
+        fun updateBlink() {
+            blinkFlashEnd = System.currentTimeMillis() + 1000L
+            postInvalidateOnAnimation()
+        }
 
         fun updateLandmarks(list: List<NormalizedLandmark>) {
             landmarks = list
@@ -718,6 +726,13 @@ class HeadPosePlugin :
                 else             -> Color.GREEN
             }
             canvas.drawText(direction.uppercase(), 20f, 76f, dirPaint)
+
+            // وميض "BLINK ✓" لمدة ثانية عند كل غمزة مكتشفة
+            if (System.currentTimeMillis() < blinkFlashEnd) {
+                dirPaint.color = Color.WHITE
+                canvas.drawText("BLINK ✓", 20f, 140f, dirPaint)
+                postInvalidateOnAnimation()  // استمر في الرسم حتى ينتهي الوميض
+            }
         }
     }
 }
