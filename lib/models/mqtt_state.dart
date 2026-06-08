@@ -1,20 +1,17 @@
 class MqttState {
   final bool isConnected;
   final bool isConnecting;
+  final bool needsLogin;
   final String? error;
-
-  // حالات الأجهزة
   final bool lamp;
-  final bool led;
   final bool strip;
   final bool fan;
   final bool security;
-  final bool motion;
+  final bool led;
   final double temperature;
   final double humidity;
   final int gas;
-
-  // حالات إضافية
+  final bool motion;
   final bool gatewayOnline;
   final bool isPaired;
   final DateTime? lastHeartbeat;
@@ -22,16 +19,17 @@ class MqttState {
   const MqttState({
     this.isConnected = false,
     this.isConnecting = false,
+    this.needsLogin = false,
     this.error,
     this.lamp = false,
-    this.led = false,
     this.strip = false,
     this.fan = false,
     this.security = false,
-    this.motion = false,
+    this.led = false,
     this.temperature = 0.0,
     this.humidity = 0.0,
     this.gas = 0,
+    this.motion = false,
     this.gatewayOnline = false,
     this.isPaired = false,
     this.lastHeartbeat,
@@ -40,16 +38,17 @@ class MqttState {
   MqttState copyWith({
     bool? isConnected,
     bool? isConnecting,
+    bool? needsLogin,
     String? error,
     bool? lamp,
-    bool? led,
     bool? strip,
     bool? fan,
     bool? security,
-    bool? motion,
+    bool? led,
     double? temperature,
     double? humidity,
     int? gas,
+    bool? motion,
     bool? gatewayOnline,
     bool? isPaired,
     DateTime? lastHeartbeat,
@@ -57,16 +56,17 @@ class MqttState {
     return MqttState(
       isConnected: isConnected ?? this.isConnected,
       isConnecting: isConnecting ?? this.isConnecting,
+      needsLogin: needsLogin ?? this.needsLogin,
       error: error ?? this.error,
       lamp: lamp ?? this.lamp,
-      led: led ?? this.led,
       strip: strip ?? this.strip,
       fan: fan ?? this.fan,
       security: security ?? this.security,
-      motion: motion ?? this.motion,
+      led: led ?? this.led,
       temperature: temperature ?? this.temperature,
       humidity: humidity ?? this.humidity,
       gas: gas ?? this.gas,
+      motion: motion ?? this.motion,
       gatewayOnline: gatewayOnline ?? this.gatewayOnline,
       isPaired: isPaired ?? this.isPaired,
       lastHeartbeat: lastHeartbeat ?? this.lastHeartbeat,

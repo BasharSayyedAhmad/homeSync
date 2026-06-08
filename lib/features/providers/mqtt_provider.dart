@@ -1,8 +1,9 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:homesync/models/mqtt_state.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
+import '../../core/services/secure_storage_service.dart';
+import '../../core/services/hive_service.dart';
 
 part 'mqtt_provider.g.dart';
 
@@ -10,32 +11,101 @@ part 'mqtt_provider.g.dart';
 class MqttNotifier extends _$MqttNotifier {
   late MqttServerClient _client;
   bool _isConnecting = false;
-  bool _firstConnection = true; // لتتبع أول اتصال
+  bool _firstConnection = true;
+  bool _isInitialized = false;
+
+  // ✅ إضافة متغير لتتبع حالة تحميل البيانات
+  bool _credentialsLoaded = false;
+
+  String? _broker;
+  String? _username;
+  String? _password;
+  String? _clientId;
 
   @override
   MqttState build() {
-    Future.delayed(const Duration(seconds: 1), () {
-      _setupMqttAsync();
-    });
+    if (!_isInitialized) {
+      _isInitialized = true;
+      Future.microtask(() => _loadAndSetupMqtt());
+    }
     return const MqttState();
   }
 
+  Future<void> _loadAndSetupMqtt() async {
+    if (_isConnecting || state.isConnected) {
+      print('⚠️ [MQTT] Already connecting or connected, skipping...');
+      return;
+    }
+
+    print('🔐 [MQTT] Loading credentials from secure storage...');
+    final creds = await SecureStorageService.getMQTTcredentials();
+    _broker = creds['broker'];
+    _username = creds['username'];
+    _password = creds['password'];
+    _clientId = creds['clientId'];
+
+    // ✅ علامة أن البيانات تحملت
+    _credentialsLoaded = true;
+
+    print(
+      '🔐 [MQTT] Credentials loaded - Broker: $_broker, Username: $_username',
+    );
+
+    if (_broker == null || _broker!.isEmpty) {
+      print('⚠️ [MQTT] No credentials found. Please login first.');
+      state = state.copyWith(
+        isConnected: false,
+        error: 'الرجاء تسجيل الدخول أولاً',
+        needsLogin: true,
+      );
+      return;
+    }
+
+    await _setupMqttAsync();
+  }
+
   Future<void> _setupMqttAsync() async {
+    // ✅ انتظر حتى تتحمل البيانات (بحد أقصى 5 ثواني)
+    int waitCount = 0;
+    while (!_credentialsLoaded && waitCount < 50) {
+      await Future.delayed(const Duration(milliseconds: 100));
+      waitCount++;
+    }
+
+    if (!_credentialsLoaded) {
+      print('❌ [MQTT] Timeout waiting for credentials');
+      state = state.copyWith(needsLogin: true, isConnecting: false);
+      return;
+    }
+
+    // ✅ الآن تأكد من البيانات بعد الانتظار
+    if (_broker == null || _broker!.isEmpty) {
+      print('❌ [MQTT] Broker is null or empty');
+      state = state.copyWith(needsLogin: true, isConnecting: false);
+      return;
+    }
+
+    if (_username == null || _username!.isEmpty) {
+      print('❌ [MQTT] Username is null or empty');
+      state = state.copyWith(needsLogin: true, isConnecting: false);
+      return;
+    }
+
+    if (_password == null || _password!.isEmpty) {
+      print('❌ [MQTT] Password is null or empty');
+      state = state.copyWith(needsLogin: true, isConnecting: false);
+      return;
+    }
+
     if (_isConnecting || state.isConnected) return;
+
     _isConnecting = true;
+    state = state.copyWith(isConnecting: true, error: null, needsLogin: false);
 
-    state = state.copyWith(isConnecting: true, error: null);
+    print('🔵 [MQTT] Starting connection to: $_broker');
 
-    const broker = 'ec718fd2e0b34835a04866dc30cbff70.s1.eu.hivemq.cloud';
-    const port = 8883;
-    const clientId = 'Flutter_Bashar_987';
-    const username = 'mestoreus';
-    const password = 'mesto1999@A';
-
-    print('🔵 [MQTT] Starting connection to: $broker:$port');
-
-    _client = MqttServerClient(broker, clientId)
-      ..port = port
+    _client = MqttServerClient(_broker!, _clientId ?? 'Flutter_Client')
+      ..port = 8883
       ..secure = true
       ..keepAlivePeriod = 60
       ..autoReconnect = true
@@ -43,8 +113,8 @@ class MqttNotifier extends _$MqttNotifier {
       ..onDisconnected = _onDisconnected;
 
     final connMessage = MqttConnectMessage()
-        .authenticateAs(username, password)
-        .withClientIdentifier(clientId)
+        .authenticateAs(_username!, _password!)
+        .withClientIdentifier(_clientId ?? 'Flutter_Client')
         .startClean()
         .keepAliveFor(60);
     _client.connectionMessage = connMessage;
@@ -59,10 +129,8 @@ class MqttNotifier extends _$MqttNotifier {
         _subscribe();
         _listenForMessages();
 
-        // بعد أول اتصال، نطلب الحالة الحالية للبوابة
         if (_firstConnection) {
           _firstConnection = false;
-          // نطلب حالة البوابة (اختياري)
           _requestGatewayStatus();
         }
       } else {
@@ -83,8 +151,63 @@ class MqttNotifier extends _$MqttNotifier {
     }
   }
 
+  Future<bool> loginWithCredentials({
+    required String broker,
+    required String username,
+    required String password,
+    String? clientId,
+  }) async {
+    await SecureStorageService.saveMQTTcredentials(
+      broker: broker,
+      username: username,
+      password: password,
+      clientId: clientId ?? 'Flutter_${DateTime.now().millisecondsSinceEpoch}',
+    );
+
+    _broker = broker;
+    _username = username;
+    _password = password;
+    _clientId = clientId;
+    _credentialsLoaded = true; // ✅ علامة أن البيانات تحملت
+
+    await _setupMqttAsync();
+
+    if (state.isConnected) {
+      final session = UserSession(
+        username: username,
+        isLoggedIn: true,
+        loginTime: DateTime.now(),
+        sessionExpiry: DateTime.now().add(const Duration(days: 30)),
+      );
+      await HiveService.saveSession(session);
+      return true;
+    }
+
+    return false;
+  }
+
+  Future<void> logout() async {
+    if (_client.connectionStatus?.state == MqttConnectionState.connected) {
+      _client.disconnect();
+    }
+
+    await SecureStorageService.clearMQTTcredentials();
+    await HiveService.clearSession();
+
+    state = const MqttState().copyWith(needsLogin: true);
+    _broker = null;
+    _username = null;
+    _password = null;
+    _clientId = null;
+    _isConnecting = false;
+    _firstConnection = true;
+    _isInitialized = false;
+    _credentialsLoaded = false; // ✅ إعادة تعيين
+
+    print('🔴 [MQTT] Logged out and credentials cleared');
+  }
+
   void _requestGatewayStatus() {
-    // نطلب الحالة الحالية من البوابة
     const reqTopic = 'home/gateway/get';
     final builder = MqttClientPayloadBuilder();
     builder.addString('status');
@@ -93,7 +216,6 @@ class MqttNotifier extends _$MqttNotifier {
   }
 
   void _subscribe() {
-    // المواضيع الصحيحة حسب كود ESP32
     const topics = [
       'home/lamp',
       'home/fan',
@@ -106,8 +228,8 @@ class MqttNotifier extends _$MqttNotifier {
       'home/sensors/motion',
       'home/gateway/status',
       'home/gateway/heartbeat',
-      'home/ac/pair/ack', // للاقتران مع AC Node
-      'home/gateway/error', // أخطاء البوابة
+      'home/ac/pair/ack',
+      'home/gateway/error',
     ];
 
     for (var topic in topics) {
@@ -131,7 +253,6 @@ class MqttNotifier extends _$MqttNotifier {
 
   void _handleIncoming(String topic, String payload) {
     switch (topic) {
-      // الأجهزة
       case 'home/strip':
         state = state.copyWith(strip: payload == '1');
         break;
@@ -144,8 +265,6 @@ class MqttNotifier extends _$MqttNotifier {
       case 'home/security':
         state = state.copyWith(security: payload.toUpperCase() == 'ON');
         break;
-
-      // الحساسات
       case 'home/sensors/temperature':
         state = state.copyWith(temperature: double.tryParse(payload) ?? 0.0);
         break;
@@ -157,37 +276,29 @@ class MqttNotifier extends _$MqttNotifier {
         break;
       case 'home/sensors/gas/level':
         print('📊 Gas level: $payload');
-        // يمكن إضافة متغير gasLevel في MqttState إذا احتجت
         break;
       case 'home/sensors/motion':
         state = state.copyWith(motion: payload == '1');
         break;
-
-      // حالة البوابة - تجاهل القيم القديمة
       case 'home/gateway/status':
-        // إذا كانت القيمة offline والجهاز متصل، نتجاهلها (يمكن أن تكون قيمة قديمة)
         if (payload == 'offline' && state.isConnected && !_firstConnection) {
           print('🚪 Ignoring stale offline status');
           return;
         }
         print('🚪 Gateway status: $payload');
-        // إذا كانت القيمة online، نحدث الحالة
         if (payload == 'online') {
           state = state.copyWith(gatewayOnline: true);
         } else if (payload == 'offline') {
           state = state.copyWith(gatewayOnline: false);
         }
         break;
-
       case 'home/gateway/heartbeat':
         print('💓 Gateway heartbeat: $payload');
         state = state.copyWith(lastHeartbeat: DateTime.now());
         break;
-
       case 'home/gateway/error':
         print('❌ Gateway error: $payload');
         break;
-
       case 'home/ac/pair/ack':
         print('🔐 Pairing ACK: $payload');
         if (payload == 'PAIR_OK') {
@@ -205,7 +316,6 @@ class MqttNotifier extends _$MqttNotifier {
       return;
     }
 
-    // تحديث الحالة محلياً
     switch (command) {
       case 'LAMP_ON':
         state = state.copyWith(lamp: true);
@@ -230,6 +340,7 @@ class MqttNotifier extends _$MqttNotifier {
         break;
       case 'SECURITY_OFF':
         state = state.copyWith(security: false);
+        break;
       case 'LED_ON':
         state = state.copyWith(led: true);
         break;
@@ -238,7 +349,6 @@ class MqttNotifier extends _$MqttNotifier {
         break;
     }
 
-    // إرسال الأمر عبر MQTT
     const cmdTopic = 'home/commands';
     final builder = MqttClientPayloadBuilder();
     builder.addString(command);
@@ -246,7 +356,6 @@ class MqttNotifier extends _$MqttNotifier {
     print('📤 [MQTT] Command sent: $command');
   }
 
-  // دالة لإرسال أمر اقتران (Pairing)
   void sendPairingCommand() {
     if (!state.isConnected) {
       print('⚠️ [MQTT] Cannot send pairing command: Not connected');
