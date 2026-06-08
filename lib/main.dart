@@ -3,14 +3,19 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/services/hive_service.dart';
 import 'core/services/secure_storage_service.dart';
+import 'core/services/gas_notification_service.dart'; // ✅ إضافة
 import 'features/auth/login_screen.dart';
 import 'features/home/home_screen.dart';
+import 'features/ac/ac_remote_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // تهيئة Hive
   await HiveService.init();
+
+  // ✅ تهيئة إشعارات الغاز
+  await GasNotificationService().initialize();
 
   // التحقق من وجود جلسة سابقة
   final hasSession = HiveService.hasValidSession();

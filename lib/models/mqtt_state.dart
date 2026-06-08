@@ -15,6 +15,21 @@ class MqttState {
   final bool gatewayOnline;
   final bool isPaired;
   final DateTime? lastHeartbeat;
+  // ✅ AC State (جديد)
+  final bool acPower;
+  final String acMode; // "cool", "heat", "dry", "off"
+  final int acTemp; // 18-29
+  final int acFan; // 1, 2, 3
+  final bool acSwing;
+  final bool acAutoMode;
+  final String acSeason; // "summer", "winter"
+
+  // ✅ Door & Garage (جديد)
+  final bool doorOpen;
+  final bool garageOpen;
+
+  // ✅ Gas Alert (جديد)
+  final String gasLevel; // "OK", "WARN", "ALERT"
 
   const MqttState({
     this.isConnected = false,
@@ -33,6 +48,21 @@ class MqttState {
     this.gatewayOnline = false,
     this.isPaired = false,
     this.lastHeartbeat,
+    // ✅ AC defaults
+    this.acPower = false,
+    this.acMode = 'off',
+    this.acTemp = 24,
+    this.acFan = 2,
+    this.acSwing = false,
+    this.acAutoMode = false,
+    this.acSeason = 'summer',
+
+    // ✅ Door/Garage defaults
+    this.doorOpen = false,
+    this.garageOpen = false,
+
+    // ✅ Gas defaults
+    this.gasLevel = 'OK',
   });
 
   MqttState copyWith({
@@ -52,6 +82,22 @@ class MqttState {
     bool? gatewayOnline,
     bool? isPaired,
     DateTime? lastHeartbeat,
+
+    // ✅ AC copyWith
+    bool? acPower,
+    String? acMode,
+    int? acTemp,
+    int? acFan,
+    bool? acSwing,
+    bool? acAutoMode,
+    String? acSeason,
+
+    // ✅ Door/Garage copyWith
+    bool? doorOpen,
+    bool? garageOpen,
+
+    // ✅ Gas copyWith
+    String? gasLevel,
   }) {
     return MqttState(
       isConnected: isConnected ?? this.isConnected,
@@ -70,6 +116,22 @@ class MqttState {
       gatewayOnline: gatewayOnline ?? this.gatewayOnline,
       isPaired: isPaired ?? this.isPaired,
       lastHeartbeat: lastHeartbeat ?? this.lastHeartbeat,
+
+      // ✅ AC
+      acPower: acPower ?? this.acPower,
+      acMode: acMode ?? this.acMode,
+      acTemp: acTemp ?? this.acTemp,
+      acFan: acFan ?? this.acFan,
+      acSwing: acSwing ?? this.acSwing,
+      acAutoMode: acAutoMode ?? this.acAutoMode,
+      acSeason: acSeason ?? this.acSeason,
+
+      // ✅ Door/Garage
+      doorOpen: doorOpen ?? this.doorOpen,
+      garageOpen: garageOpen ?? this.garageOpen,
+
+      // ✅ Gas
+      gasLevel: gasLevel ?? this.gasLevel,
     );
   }
 }

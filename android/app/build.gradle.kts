@@ -12,6 +12,8 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
+        // أضف هذا السطر بالضبط
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -24,9 +26,10 @@ android {
         targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        
+        multiDexEnabled = true
     }
 
-    // 🌟 الإضافة الحيوية لمنع ضغط ملف النموذج الخاص بـ MediaPipe 🌟
     androidResources {
         noCompress += "task"
     }
@@ -34,8 +37,6 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
-            
-            // ✅ أضف هذين السطرين لمنع مشكلة R8
             isMinifyEnabled = false
             isShrinkResources = false
         }
@@ -47,6 +48,9 @@ flutter {
 }
 
 dependencies {
+    // ✅ هذا السطر مهم جداً لتفعيل desugaring
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.9.0")
     

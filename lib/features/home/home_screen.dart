@@ -7,36 +7,8 @@
 //  • HomeScreen extends ConsumerWidget — Riverpod-only business state
 //  • No setState in HomeScreen; sub-widgets use ValueNotifier for local UI state
 //  • ref.watch() for state, ref.read().notifier for actions
-//  • AC gauge drag sends AC_TEMP:{value} via mqttNotifier (debounced, 120 ms)
 //
 // ══════════════════════════════════════════════════════════════════════════════
-// BUG-FIXES & PERFORMANCE IMPROVEMENTS (vs. original)
-// ──────────────────────────────────────────────────────────────────────────────
-// 1. [BUG] _ControlTile StatefulWidget class body was missing entirely —
-//    added the class declaration with required props.
-// 2. [BUG] _SensorPanel first _SensorTile (TEMP) was missing `color:` arg —
-//    added `color: _DT.neonGreen` (green = normal reading).
-// 3. [BUG] _AcButton build() method was missing — class jumped straight to
-//    @override without a class header; restored full class + build.
-// 4. [BUG] _SensorPanel: `color: _DT.neonRed` was hardcoded for TEMP tile
-//    instead of being data-driven — now uses neonGreen/neonOrange threshold.
-// 5. [PERF] withOpacity() replaced with .withValues(alpha:) everywhere
-//    (withOpacity is deprecated in Flutter 3.27+).
-// 6. [PERF] _WavePainter: replaced pixel-by-pixel lineTo loop (1000+ calls)
-//    with a coarser step-2 loop + Path.cubicTo approximation using only ~80
-//    segments — visually identical, ~12× fewer draw calls per frame.
-// 7. [PERF] _ArcGaugePainter._drawLabel: moved TextPainter layout outside
-//    paint() using a static cache map keyed by label text — avoids re-layout
-//    on every repaint frame.
-// 8. [PERF] _ControlMatrix._tiles(): extracted to a top-level const-friendly
-//    builder so the List is not reconstructed on every build() call; tiles
-//    are only rebuilt when state actually changes (same equality check).
-// 9. [PERF] _GlassCard: BackdropFilter sigmaX/Y reduced from 14 to 10 — GPU
-//    cost is quadratic; saves ~50 % blur cost with no visible quality loss.
-// 10.[PERF] _VoiceFab AnimatedBuilder wraps entire Stack including the
-//    non-animated FloatingActionButton — narrowed builder scope so only
-//    the pulsing ring repaints, not the FAB.
-// ─────────────────────────────────────────────────────────────────────────────
 
 import 'dart:async';
 import 'dart:math' as math;
@@ -44,6 +16,8 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:homesync/core/services/gas_notification_service.dart';
+import 'package:homesync/features/ac/ac_remote_screen.dart';
 import 'package:homesync/features/head_pose/head_pose_screen.dart';
 import 'package:homesync/features/providers/mqtt_provider.dart';
 import 'package:homesync/features/providers/voice_provider.dart';
@@ -53,15 +27,10 @@ import 'package:homesync/models/mqtt_state.dart';
 // DESIGN TOKENS
 // ─────────────────────────────────────────────────────────────────────────────
 abstract final class _DT {
-  // Backgrounds
   static const bg = Color(0xFF0D1117);
   static const surface = Color(0xFF161B22);
-
-  // Glass layer
-  static const glass = Color(0x0DFFFFFF); // 5 % white
-  static const border = Color(0x1AFFFFFF); // 10 % white
-
-  // Neon palette
+  static const glass = Color(0x0DFFFFFF);
+  static const border = Color(0x1AFFFFFF);
   static const neonGreen = Color(0xFF00FF88);
   static const neonRed = Color(0xFFFF2060);
   static const neonBlue = Color(0xFF00D4FF);
@@ -69,21 +38,15 @@ abstract final class _DT {
   static const neonYellow = Color(0xFFFFD000);
   static const neonOrange = Color(0xFFFF6B35);
   static const neonCyan = Color(0xFF00FFFF);
-
-  // Text
   static const textPrimary = Color(0xFFE6EDF3);
   static const textSecondary = Color(0xFF8B949E);
-
-  // AC gauge gradient poles
-  static const acCool = Color(0xFF00D4FF); // ice-blue  (cold)
-  static const acWarm = Color(0xFFFF6B00); // deep amber (hot)
-
-  // Shared radius
+  static const acCool = Color(0xFF00D4FF);
+  static const acWarm = Color(0xFFFF6B00);
   static const radius = 16.0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HOME SCREEN  (ConsumerWidget — no setState)
+// HOME SCREEN
 // ─────────────────────────────────────────────────────────────────────────────
 class HomeScreen extends ConsumerWidget {
   const HomeScreen({super.key});
@@ -95,16 +58,23 @@ class HomeScreen extends ConsumerWidget {
     final voiceNotifier = ref.read(voiceNotifierProvider.notifier);
     final mqttNotifier = ref.read(mqttNotifierProvider.notifier);
 
+    // ✅ Gas Alert listener
+    ref.listen(mqttNotifierProvider, (previous, next) {
+      if (previous?.gasLevel != next.gasLevel && next.gasLevel != 'OK') {
+        GasNotificationService().showGasAlert(next.gasLevel);
+      }
+    });
+
     return Scaffold(
       backgroundColor: _DT.bg,
       extendBodyBehindAppBar: true,
-      // ── Transparent, ambient AppBar ────────────────────────────────────
-      appBar: _CyberAppBar(isConnected: mqttState.isConnected),
-      // ── Layered Stack: scroll content + floating overlays ──────────────
+      appBar: _CyberAppBar(
+        isConnected: mqttState.isConnected,
+        gasLevel: mqttState.gasLevel,
+      ),
       body: SafeArea(
         child: Stack(
           children: [
-            // Main scrollable body
             SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
               child: Column(
@@ -115,18 +85,6 @@ class HomeScreen extends ConsumerWidget {
                   _SensorPanel(state: mqttState),
                   const SizedBox(height: 20),
 
-                  _SectionLabel(label: 'CLIMATE CONTROL'),
-                  const SizedBox(height: 8),
-                  _AcControlPanel(
-                    temperature: mqttState.temperature,
-                    onCool: () => mqttNotifier.sendCommand('AC_COOL'),
-                    onWarm: () => mqttNotifier.sendCommand('AC_WARM'),
-                    // Sends AC_TEMP:{rounded value} via MQTT on drag
-                    onTemperatureChanged: (t) =>
-                        mqttNotifier.sendCommand('AC_TEMP:${t.round()}'),
-                  ),
-                  const SizedBox(height: 20),
-
                   _SectionLabel(label: 'COMMAND MATRIX'),
                   const SizedBox(height: 8),
                   _ControlMatrix(state: mqttState, notifier: mqttNotifier),
@@ -135,25 +93,20 @@ class HomeScreen extends ConsumerWidget {
               ),
             ),
 
-            // Voice listening wave overlay (bottom sheet style)
             if (voiceState.isListening)
               _VoiceListeningOverlay(onStop: voiceNotifier.stopListening),
 
-            // Feedback toast (top)
             if (voiceState.feedback.isNotEmpty)
               _VoiceToast(
                 feedback: voiceState.feedback,
                 onDismiss: voiceNotifier.clearFeedback,
               ),
 
-            // Recognized text toast (just below feedback)
             if (voiceState.recognizedText.isNotEmpty)
               _RecognizedTextToast(text: voiceState.recognizedText),
           ],
         ),
       ),
-
-      // ── Mic FAB ───────────────────────────────────────────────────────
       floatingActionButton: _VoiceFab(
         isListening: voiceState.isListening,
         onPressed: voiceState.isListening
@@ -165,11 +118,12 @@ class HomeScreen extends ConsumerWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AMBIENT TRANSPARENT APP BAR
+// AMBIENT TRANSPARENT APP BAR (with GAS Alert)
 // ─────────────────────────────────────────────────────────────────────────────
 class _CyberAppBar extends StatelessWidget implements PreferredSizeWidget {
-  const _CyberAppBar({required this.isConnected});
+  const _CyberAppBar({required this.isConnected, required this.gasLevel});
   final bool isConnected;
+  final String gasLevel;
 
   @override
   Size get preferredSize => const Size.fromHeight(kToolbarHeight);
@@ -197,6 +151,7 @@ class _CyberAppBar extends StatelessWidget implements PreferredSizeWidget {
       ),
       centerTitle: true,
       actions: [
+        _GasAlertButton(gasLevel: gasLevel),
         Padding(
           padding: const EdgeInsets.only(right: 16),
           child: Row(
@@ -217,6 +172,54 @@ class _CyberAppBar extends StatelessWidget implements PreferredSizeWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GAS ALERT BUTTON (AppBar)
+// ─────────────────────────────────────────────────────────────────────────────
+class _GasAlertButton extends StatelessWidget {
+  const _GasAlertButton({required this.gasLevel});
+  final String gasLevel;
+
+  @override
+  Widget build(BuildContext context) {
+    final isAlert = gasLevel == 'ALERT';
+    final isWarn = gasLevel == 'WARN';
+    final color = isAlert
+        ? _DT.neonRed
+        : isWarn
+        ? _DT.neonOrange
+        : _DT.neonGreen;
+
+    return GestureDetector(
+      onTap: () => GasNotificationService().showGasAlert(gasLevel),
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: color.withValues(alpha: 0.1),
+          border: Border.all(
+            color: color.withValues(alpha: isAlert || isWarn ? 0.8 : 0.3),
+            width: isAlert ? 2 : 1,
+          ),
+          boxShadow: isAlert
+              ? [
+                  BoxShadow(
+                    color: color.withValues(alpha: 0.5),
+                    blurRadius: 12,
+                    spreadRadius: 2,
+                  ),
+                ]
+              : null,
+        ),
+        child: Center(
+          child: Icon(Icons.local_gas_station, color: color, size: 16),
+        ),
+      ),
     );
   }
 }
@@ -263,7 +266,6 @@ class _SectionLabel extends StatelessWidget {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GLASSMORPHIC CARD BASE
-// FIX [PERF #9]: blur sigma reduced 14 → 10 (GPU cost is quadratic with sigma)
 // ─────────────────────────────────────────────────────────────────────────────
 class _GlassCard extends StatelessWidget {
   const _GlassCard({
@@ -283,7 +285,6 @@ class _GlassCard extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(_DT.radius),
       child: BackdropFilter(
-        // FIX #9: was 14 — halving sigma cuts GPU cost ~75 %
         filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 400),
@@ -321,7 +322,7 @@ class _GlassCard extends StatelessWidget {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PULSING NEON DOT  (MQTT status heartbeat)
+// PULSING NEON DOT
 // ─────────────────────────────────────────────────────────────────────────────
 class _PulsingDot extends StatefulWidget {
   const _PulsingDot({required this.isConnected});
@@ -391,7 +392,7 @@ class _PulsingDotState extends State<_PulsingDot>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HUD ICON BUTTON  (radar + spinning halo arc)
+// HUD ICON BUTTON
 // ─────────────────────────────────────────────────────────────────────────────
 class _HudIconButton extends StatefulWidget {
   const _HudIconButton({required this.onTap});
@@ -457,7 +458,6 @@ class _HudIconButtonState extends State<_HudIconButton>
   }
 }
 
-/// Draws a 288° sweep-gradient arc — the spinning halo.
 class _HaloPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
@@ -484,14 +484,11 @@ class _HaloPainter extends CustomPainter {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SENSOR PANEL
-// FIX #2 & #4: TEMP tile was missing `color:` and used hardcoded neonRed.
-//              Now uses neonGreen below 30 °C, neonOrange above.
 // ─────────────────────────────────────────────────────────────────────────────
 class _SensorPanel extends StatelessWidget {
   const _SensorPanel({required this.state});
   final MqttState state;
 
-  /// Tune thresholds to match your hardware calibration.
   bool get _isCritical => state.motion || state.gas > 400;
 
   @override
@@ -506,8 +503,6 @@ class _SensorPanel extends StatelessWidget {
             spacing: 12,
             runSpacing: 12,
             children: [
-              // FIX #2: restored missing `color:` parameter
-              // FIX #4: color is now data-driven (green/orange threshold)
               SizedBox(
                 width: tileW,
                 child: _SensorTile(
@@ -558,7 +553,6 @@ class _SensorPanel extends StatelessWidget {
   }
 }
 
-/// Individual frosted sensor tile with optional heartbeat glow when critical.
 class _SensorTile extends StatefulWidget {
   const _SensorTile({
     required this.icon,
@@ -676,490 +670,14 @@ class _SensorTileState extends State<_SensorTile>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AC CONTROL PANEL
-// ─────────────────────────────────────────────────────────────────────────────
-class _AcControlPanel extends StatelessWidget {
-  const _AcControlPanel({
-    required this.temperature,
-    required this.onCool,
-    required this.onWarm,
-    this.onTemperatureChanged,
-  });
-
-  final double temperature;
-  final VoidCallback onCool;
-  final VoidCallback onWarm;
-
-  /// Called with the new °C value continuously while dragging, and on release.
-  final void Function(double)? onTemperatureChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return _GlassCard(
-      glowColor: _DT.acCool,
-      child: Column(
-        children: [
-          // Circular arc gauge — fixed aspect ratio prevents overflow
-          AspectRatio(
-            aspectRatio: 1.8,
-            child: _AcGaugeDial(
-              temperature: temperature,
-              onTemperatureChanged: onTemperatureChanged,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              _AcButton(
-                label: 'COOL',
-                icon: Icons.ac_unit,
-                color: _DT.acCool,
-                onTap: onCool,
-              ),
-              _AcButton(
-                label: 'WARM',
-                icon: Icons.local_fire_department,
-                color: _DT.acWarm,
-                onTap: onWarm,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AC GAUGE DIAL  — draggable 270° arc with live MQTT dispatch
-//
-// Drag interaction geometry:
-//   Arc  : 135° → 405° clockwise (270° sweep)
-//   Dead : 45°  → 135° (90° gap) — touches here are silently ignored
-//   Range: 16 °C (cold / start) → 32 °C (hot / end)
-//
-// No setState used — local reactivity runs through two ValueNotifiers:
-//   _tempVN  : current displayed temperature (double)
-//   _dragVN  : whether user is actively dragging (bool)
-// ─────────────────────────────────────────────────────────────────────────────
-class _AcGaugeDial extends StatefulWidget {
-  const _AcGaugeDial({required this.temperature, this.onTemperatureChanged});
-
-  final double temperature;
-  final void Function(double)? onTemperatureChanged;
-
-  @override
-  State<_AcGaugeDial> createState() => _AcGaugeDialState();
-}
-
-class _AcGaugeDialState extends State<_AcGaugeDial> {
-  // ── Arc constants ─────────────────────────────────────────────────────
-  static const _minT = 16.0;
-  static const _maxT = 32.0;
-  static const _startAngle = math.pi * 0.75; // 135 °
-  static const _sweepFull = math.pi * 1.50; // 270 °
-  static const _endAngle = _startAngle + _sweepFull; // 405 ° ≡ 45 °
-
-  // ── Reactive state (no setState) ─────────────────────────────────────
-  late final ValueNotifier<double> _tempVN;
-  late final ValueNotifier<bool> _dragVN;
-  Timer? _debounce;
-
-  // ── Helpers ───────────────────────────────────────────────────────────
-  double _normalize(double t) =>
-      ((t - _minT) / (_maxT - _minT)).clamp(0.0, 1.0);
-
-  /// Returns null when the touch is inside the 90° dead zone (45 °→135 °).
-  double? _posToTemp(Offset localPos, Offset center) {
-    final dx = localPos.dx - center.dx;
-    final dy = localPos.dy - center.dy;
-    var angle = math.atan2(dy, dx); // [-π, π]
-    if (angle < 0) angle += 2 * math.pi; // [0, 2π]
-
-    // Dead zone: [π/4, 3π/4]  →  45° to 135°
-    if (angle > math.pi * 0.25 && angle < math.pi * 0.75) return null;
-
-    // Shift angles that have crossed 0°/360° to be continuous with the arc
-    final adjusted = angle < _startAngle ? angle + 2 * math.pi : angle;
-    final clamped = adjusted.clamp(_startAngle, _endAngle);
-    final t = (clamped - _startAngle) / _sweepFull;
-    return _minT + t * (_maxT - _minT);
-  }
-
-  // ── Lifecycle ─────────────────────────────────────────────────────────
-  @override
-  void initState() {
-    super.initState();
-    _tempVN = ValueNotifier(widget.temperature);
-    _dragVN = ValueNotifier(false);
-  }
-
-  @override
-  void didUpdateWidget(_AcGaugeDial old) {
-    super.didUpdateWidget(old);
-    // When MQTT pushes a new value externally, sync — but never during drag
-    if (!_dragVN.value && old.temperature != widget.temperature) {
-      _tempVN.value = widget.temperature;
-    }
-  }
-
-  @override
-  void dispose() {
-    _debounce?.cancel();
-    _tempVN.dispose();
-    _dragVN.dispose();
-    super.dispose();
-  }
-
-  // ── Gesture handlers ──────────────────────────────────────────────────
-  void _onPanStart(DragStartDetails d, Offset center) {
-    final t = _posToTemp(d.localPosition, center);
-    if (t == null) return;
-    _dragVN.value = true;
-    _tempVN.value = t;
-  }
-
-  void _onPanUpdate(DragUpdateDetails d, Offset center) {
-    final t = _posToTemp(d.localPosition, center);
-    if (t == null) return;
-    _tempVN.value = t;
-    // Debounce MQTT to avoid flooding the broker every pixel
-    _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 120), () {
-      widget.onTemperatureChanged?.call(t);
-    });
-  }
-
-  void _onPanEnd(DragEndDetails _) {
-    _dragVN.value = false;
-    _debounce?.cancel();
-    widget.onTemperatureChanged?.call(_tempVN.value); // final send on lift
-  }
-
-  // ── Build ─────────────────────────────────────────────────────────────
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final size = Size(constraints.maxWidth, constraints.maxHeight);
-        final center = Offset(size.width / 2, size.height / 2);
-
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onPanStart: (d) => _onPanStart(d, center),
-          onPanUpdate: (d) => _onPanUpdate(d, center),
-          onPanEnd: _onPanEnd,
-          child: ValueListenableBuilder<bool>(
-            valueListenable: _dragVN,
-            builder: (_, isDragging, __) => ValueListenableBuilder<double>(
-              valueListenable: _tempVN,
-              builder: (_, temp, __) {
-                final progress = _normalize(temp);
-                final arcColor = Color.lerp(_DT.acCool, _DT.acWarm, progress)!;
-
-                return Stack(
-                  children: [
-                    // Arc + ticks + tip handle
-                    CustomPaint(
-                      size: size,
-                      painter: _ArcGaugePainter(
-                        progress: progress,
-                        isDragging: isDragging,
-                      ),
-                    ),
-                    // Center digital readout
-                    Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const SizedBox(height: 12),
-                          Text(
-                            temp.toStringAsFixed(1),
-                            style: TextStyle(
-                              color: arcColor,
-                              fontSize: 38,
-                              fontWeight: FontWeight.w900,
-                              fontFamily: 'monospace',
-                              shadows: [
-                                Shadow(
-                                  color: arcColor.withValues(alpha: 0.55),
-                                  blurRadius: 18,
-                                ),
-                              ],
-                            ),
-                          ),
-                          Text(
-                            '°C',
-                            style: TextStyle(
-                              color: _DT.textSecondary,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                              letterSpacing: 2,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          // Drag hint / live command preview
-                          AnimatedOpacity(
-                            opacity: isDragging ? 1.0 : 0.35,
-                            duration: const Duration(milliseconds: 200),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(
-                                  isDragging
-                                      ? Icons.send_rounded
-                                      : Icons.rotate_right,
-                                  size: 10,
-                                  color: isDragging
-                                      ? arcColor
-                                      : _DT.textSecondary,
-                                ),
-                                const SizedBox(width: 4),
-                                Text(
-                                  isDragging
-                                      ? 'AC_TEMP:${temp.round()}'
-                                      : 'DRAG TO SET',
-                                  style: TextStyle(
-                                    color: isDragging
-                                        ? arcColor
-                                        : _DT.textSecondary,
-                                    fontSize: 9,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 1.5,
-                                    shadows: isDragging
-                                        ? [
-                                            Shadow(
-                                              color: arcColor.withValues(
-                                                alpha: 0.5,
-                                              ),
-                                              blurRadius: 6,
-                                            ),
-                                          ]
-                                        : null,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ARC GAUGE PAINTER
-// FIX [PERF #7]: _drawLabel now uses a static TextPainter cache to avoid
-//               re-layout on every paint frame.
-// ─────────────────────────────────────────────────────────────────────────────
-class _ArcGaugePainter extends CustomPainter {
-  const _ArcGaugePainter({required this.progress, this.isDragging = false});
-
-  final double progress;
-  final bool isDragging;
-
-  static const _startAngle = math.pi * 0.75;
-  static const _sweepFull = math.pi * 1.5;
-
-  // FIX #7: cache painted label sizes so we never call layout() in paint().
-  static final Map<String, TextPainter> _labelCache = {};
-
-  static TextPainter _getLabel(String text) {
-    return _labelCache.putIfAbsent(text, () {
-      final tp = TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(
-            color: Colors.white.withValues(alpha: 0.25),
-            fontSize: 9,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
-      return tp;
-    });
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = math.min(size.width, size.height) * 0.42;
-    final rect = Rect.fromCircle(center: center, radius: radius);
-
-    // ── Background track ──────────────────────────────────────────────
-    canvas.drawArc(
-      rect,
-      _startAngle,
-      _sweepFull,
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 12
-        ..strokeCap = StrokeCap.round
-        ..color = Colors.white.withValues(alpha: 0.06),
-    );
-
-    if (progress <= 0) return;
-
-    // ── Active gradient arc ───────────────────────────────────────────
-    canvas.drawArc(
-      rect,
-      _startAngle,
-      _sweepFull * progress,
-      false,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = isDragging ? 14 : 12
-        ..strokeCap = StrokeCap.round
-        ..shader = SweepGradient(
-          startAngle: _startAngle,
-          endAngle: _startAngle + _sweepFull,
-          colors: const [_DT.acCool, _DT.acWarm],
-        ).createShader(rect),
-    );
-
-    // ── Glowing tip handle ────────────────────────────────────────────
-    final tipAngle = _startAngle + _sweepFull * progress;
-    final tip = Offset(
-      center.dx + radius * math.cos(tipAngle),
-      center.dy + radius * math.sin(tipAngle),
-    );
-    final tipColor = Color.lerp(_DT.acCool, _DT.acWarm, progress)!;
-
-    // Outer soft halo
-    canvas.drawCircle(
-      tip,
-      isDragging ? 16 : 10,
-      Paint()
-        ..color = tipColor.withValues(alpha: isDragging ? 0.50 : 0.30)
-        ..maskFilter = MaskFilter.blur(BlurStyle.normal, isDragging ? 14 : 9),
-    );
-
-    // Drag affordance ring (only while dragging)
-    if (isDragging) {
-      canvas.drawCircle(
-        tip,
-        9,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5
-          ..color = tipColor.withValues(alpha: 0.7),
-      );
-    }
-
-    // Solid core
-    canvas.drawCircle(tip, isDragging ? 6 : 5, Paint()..color = tipColor);
-
-    // ── Tick marks ────────────────────────────────────────────────────
-    final tickPaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.10)
-      ..strokeWidth = 1.5;
-    for (int i = 0; i <= 10; i++) {
-      final a = _startAngle + (_sweepFull / 10) * i;
-      final inner = center + Offset(math.cos(a), math.sin(a)) * (radius - 10);
-      final outer = center + Offset(math.cos(a), math.sin(a)) * (radius + 2);
-      canvas.drawLine(inner, outer, tickPaint);
-    }
-
-    // ── Temperature labels (cached) ───────────────────────────────────
-    _paintLabel(canvas, center, radius, _startAngle, '16');
-    _paintLabel(canvas, center, radius, _startAngle + _sweepFull, '32');
-  }
-
-  void _paintLabel(
-    Canvas canvas,
-    Offset center,
-    double radius,
-    double angle,
-    String text,
-  ) {
-    final pos =
-        center + Offset(math.cos(angle), math.sin(angle)) * (radius + 18);
-    final tp = _getLabel(text);
-    tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
-  }
-
-  @override
-  bool shouldRepaint(_ArcGaugePainter old) =>
-      old.progress != progress || old.isDragging != isDragging;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// AC COOL / WARM BUTTON
-// FIX #3: class declaration was entirely missing — only @override build()
-//         existed in the original. Added StatelessWidget class body.
-// ─────────────────────────────────────────────────────────────────────────────
-class _AcButton extends StatelessWidget {
-  const _AcButton({
-    required this.label,
-    required this.icon,
-    required this.color,
-    required this.onTap,
-  });
-
-  final String label;
-  final IconData icon;
-  final Color color;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 10),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(30),
-          border: Border.all(color: color.withValues(alpha: 0.35)),
-          color: color.withValues(alpha: 0.08),
-          boxShadow: [
-            BoxShadow(color: color.withValues(alpha: 0.14), blurRadius: 14),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: color, size: 16),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 11,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 2,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// COMMAND MATRIX  (responsive 3-column grid)
-// FIX [PERF #8]: _tiles() was a method called on every build() — moved to a
-//               private helper that receives state, so the result can be
-//               consumed without triggering extra allocations on unrelated
-//               state changes.
+// COMMAND MATRIX (10 tiles: 3×3 + 1 row)
 // ─────────────────────────────────────────────────────────────────────────────
 class _ControlMatrix extends StatelessWidget {
   const _ControlMatrix({required this.state, required this.notifier});
   final MqttState state;
   final MqttNotifier notifier;
 
-  List<_TileData> _buildTiles() => [
+  List<_TileData> _buildTiles(BuildContext context) => [
     _TileData(
       icon: Icons.lightbulb_outline,
       label: 'LAMP',
@@ -1182,53 +700,65 @@ class _ControlMatrix extends StatelessWidget {
       onTap: () => notifier.sendCommand(state.fan ? 'FAN_OFF' : 'FAN_ON'),
     ),
     _TileData(
-      icon: Icons.auto_awesome,
-      label: 'STRIP',
-      isOn: state.strip,
-      color: _DT.neonCyan,
-      onTap: () => notifier.sendCommand(state.strip ? 'STRIP_OFF' : 'STRIP_ON'),
+      icon: Icons.wb_sunny_outlined,
+      label: 'WHITE',
+      isOn: false,
+      color: Colors.white,
+      onTap: () => notifier.sendCommand('LED_WHITE'),
     ),
     _TileData(
-      icon: Icons.security,
-      label: 'SECURITY',
-      isOn: state.security,
+      icon: Icons.circle,
+      label: 'RED',
+      isOn: false,
       color: _DT.neonRed,
-      onTap: () =>
-          notifier.sendCommand(state.security ? 'SECURITY_OFF' : 'SECURITY_ON'),
+      onTap: () => notifier.sendCommand('LED_RED'),
+    ),
+    _TileData(
+      icon: Icons.add,
+      label: 'DIM+',
+      isOn: false,
+      color: _DT.neonGreen,
+      onTap: () => notifier.sendCommand('LED_DIM_UP'),
+    ),
+    _TileData(
+      icon: Icons.remove,
+      label: 'DIM-',
+      isOn: false,
+      color: _DT.neonGreen,
+      onTap: () => notifier.sendCommand('LED_DIM_DOWN'),
     ),
     _TileData(
       icon: Icons.meeting_room,
       label: 'DOOR',
-      isOn: false,
+      isOn: state.doorOpen,
       color: _DT.neonOrange,
-      onTap: () => notifier.sendCommand('DOOR_POS:90'),
+      onTap: () =>
+          notifier.sendCommand(state.doorOpen ? 'DOOR_CLOSE' : 'DOOR_OPEN'),
     ),
     _TileData(
       icon: Icons.garage,
       label: 'GARAGE',
-      isOn: false,
+      isOn: state.garageOpen,
       color: _DT.neonGreen,
-      onTap: () => notifier.sendCommand('GARAGE_POS:45'),
+      onTap: () => notifier.sendCommand(
+        state.garageOpen ? 'GARAGE_CLOSE' : 'GARAGE_OPEN',
+      ),
     ),
     _TileData(
-      icon: Icons.bedtime,
-      label: 'NIGHT',
-      isOn: false,
-      color: _DT.neonPurple,
-      onTap: () => notifier.sendCommand('SCENE_NIGHT'),
-    ),
-    _TileData(
-      icon: Icons.home_outlined,
-      label: 'HOME',
-      isOn: false,
-      color: _DT.neonGreen,
-      onTap: () => notifier.sendCommand('SCENE_HOME'),
+      icon: Icons.ac_unit,
+      label: 'AC',
+      isOn: state.acPower,
+      color: _DT.acCool,
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const AcRemoteScreen()),
+      ),
     ),
   ];
 
   @override
   Widget build(BuildContext context) {
-    final tiles = _buildTiles();
+    final tiles = _buildTiles(context);
     return LayoutBuilder(
       builder: (ctx, constraints) {
         const crossCount = 3;
@@ -1259,9 +789,6 @@ class _ControlMatrix extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TILE DATA  (plain data class — no logic)
-// ─────────────────────────────────────────────────────────────────────────────
 class _TileData {
   const _TileData({
     required this.icon,
@@ -1277,11 +804,6 @@ class _TileData {
   final VoidCallback onTap;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CONTROL TILE  (press-scale feedback + animated on/off state)
-// FIX #1: StatefulWidget class declaration was completely missing in the
-//         original — only _ControlTileState existed. Added the widget class.
-// ─────────────────────────────────────────────────────────────────────────────
 class _ControlTile extends StatefulWidget {
   const _ControlTile({
     required this.icon,
@@ -1430,10 +952,7 @@ class _ControlTileState extends State<_ControlTile>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VOICE FAB  (pulsing ring when listening)
-// FIX [PERF #10]: AnimatedBuilder scope narrowed — only the pulsing ring
-//                rebuilds on each animation tick; the FAB is in the static
-//                subtree (passed as `child`).
+// VOICE FAB
 // ─────────────────────────────────────────────────────────────────────────────
 class _VoiceFab extends StatefulWidget {
   const _VoiceFab({required this.isListening, required this.onPressed});
@@ -1488,7 +1007,6 @@ class _VoiceFabState extends State<_VoiceFab>
   @override
   Widget build(BuildContext context) {
     final color = widget.isListening ? _DT.neonRed : _DT.neonGreen;
-    // FIX #10: FAB is the static child — only the ring rebuilds per tick.
     final fab = FloatingActionButton(
       onPressed: widget.onPressed,
       backgroundColor: color.withValues(alpha: 0.14),
@@ -1530,7 +1048,7 @@ class _VoiceFabState extends State<_VoiceFab>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VOICE LISTENING OVERLAY  (sinusoidal wave bottom sheet)
+// VOICE LISTENING OVERLAY
 // ─────────────────────────────────────────────────────────────────────────────
 class _VoiceListeningOverlay extends StatefulWidget {
   const _VoiceListeningOverlay({required this.onStop});
@@ -1631,11 +1149,6 @@ class _VoiceListeningOverlayState extends State<_VoiceListeningOverlay>
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// WAVE PAINTER
-// FIX [PERF #6]: original used x++ (1 lineTo per pixel → 1000+ calls/frame).
-//               Now uses step=2 with only ~80 segments — identical visually.
-// ─────────────────────────────────────────────────────────────────────────────
 class _WavePainter extends CustomPainter {
   const _WavePainter({required this.phase});
   final double phase;
@@ -1649,7 +1162,6 @@ class _WavePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final midY = size.height / 2;
-    // FIX #6: step 2 instead of 1 → ~80 segments vs 1000+, no visible change
     const step = 2.0;
     for (final w in _waves) {
       final path = Path()..moveTo(0, midY);
@@ -1679,7 +1191,7 @@ class _WavePainter extends CustomPainter {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// VOICE TOAST  (slides in from top, auto-dismisses after 4 s)
+// VOICE TOAST
 // ─────────────────────────────────────────────────────────────────────────────
 class _VoiceToast extends StatefulWidget {
   const _VoiceToast({required this.feedback, required this.onDismiss});
@@ -1787,7 +1299,7 @@ class _VoiceToastState extends State<_VoiceToast>
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RECOGNIZED TEXT TOAST  (subtle glass chip — no layout shift)
+// RECOGNIZED TEXT TOAST
 // ─────────────────────────────────────────────────────────────────────────────
 class _RecognizedTextToast extends StatefulWidget {
   const _RecognizedTextToast({required this.text});
@@ -1805,14 +1317,11 @@ class _RecognizedTextToastState extends State<_RecognizedTextToast>
   @override
   void initState() {
     super.initState();
-
-    // Animation للظهور
     _ctrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 300),
     )..forward();
 
-    // ✅ إخفاء الـ Toast بعد 2 ثانية
     Future.delayed(const Duration(seconds: 2), () {
       if (mounted) {
         _ctrl.reverse().then((_) {
@@ -1834,8 +1343,7 @@ class _RecognizedTextToastState extends State<_RecognizedTextToast>
 
   @override
   Widget build(BuildContext context) {
-    if (!_visible)
-      return const SizedBox.shrink(); // ✅ إخفاء الـ Widget بدلاً من إزالته
+    if (!_visible) return const SizedBox.shrink();
 
     return Positioned(
       top: 68,
