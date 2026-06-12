@@ -18,7 +18,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:homesync/core/services/gas_notification_service.dart';
 import 'package:homesync/features/ac/ac_remote_screen.dart';
-import 'package:homesync/features/head_pose/head_pose_screen.dart';
+import 'package:homesync/features/services/eye_tracking/widgets/iris_gaze_button.dart';
+import 'package:homesync/features/services/head_pose/head_pose_screen.dart';
 import 'package:homesync/features/providers/mqtt_provider.dart';
 import 'package:homesync/features/providers/voice_provider.dart';
 import 'package:homesync/models/mqtt_state.dart';
@@ -89,6 +90,12 @@ class HomeScreen extends ConsumerWidget {
                   const SizedBox(height: 8),
                   _ControlMatrix(state: mqttState, notifier: mqttNotifier),
                   const SizedBox(height: 20),
+                  IrisGazeButton(
+                    onGazeChanged: (gaze) {
+                      print('اتجاه العين: $gaze');
+                      // ← هنا ربطه بأوامرك
+                    },
+                  ),
                 ],
               ),
             ),

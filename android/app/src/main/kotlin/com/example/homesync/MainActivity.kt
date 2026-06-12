@@ -11,5 +11,6 @@ class MainActivity : FlutterActivity() {
 
         // Register the native plugin manually
         flutterEngine.plugins.add(HeadPosePlugin())
+        flutterEngine.plugins.add(IrisGazePlugin())
     }
 }

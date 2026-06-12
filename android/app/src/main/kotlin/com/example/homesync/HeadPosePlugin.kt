@@ -137,7 +137,7 @@ class HeadPosePlugin :
     // ─────────────────────────────────────────────────────────────────────────
     // ميزة 2: رصد القزحية (Iris Gaze)
     // ─────────────────────────────────────────────────────────────────────────
-    var enableIrisGaze = true
+    var enableIrisGaze = false
     // النسبة بين الطرفين: < 0.35 = يسار | > 0.65 = يمين
     private val gazeLeftThreshold  = 0.35f
     private val gazeRightThreshold = 0.65f
@@ -155,7 +155,7 @@ class HeadPosePlugin :
     // ─────────────────────────────────────────────────────────────────────────
     // ميزة 4: إمالة الرأس (Tilt — Roll Axis)
     // ─────────────────────────────────────────────────────────────────────────
-    var enableTiltGesture = true
+    var enableTiltGesture = false
     private val tiltLeftEnter  = -20.0;  private val tiltLeftExit  = -8.0
     private val tiltRightEnter =  20.0;  private val tiltRightExit =  8.0
     private var lastTilt = "center"
@@ -163,7 +163,7 @@ class HeadPosePlugin :
     // ─────────────────────────────────────────────────────────────────────────
     // ميزة 5: هز الرأس "لا" (Head Shake)
     // ─────────────────────────────────────────────────────────────────────────
-    var enableHeadShake = true
+    var enableHeadShake = false
     // يحتاج 4 تحولات (يسار-يمين-يسار-يمين) خلال 1.2 ثانية → غير محتمل عرضياً
     private val shakeWindowMs   = 1200L
     private val shakeMinYaw     = 15.0   // يُطابق yawLeftEnter لتجنب التشغيل الخاطئ
